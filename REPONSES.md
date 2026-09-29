@@ -88,3 +88,37 @@ Code **400** (requête invalide), avec une `strict_dynamic_mapping_exception` : 
 Le mapping devient un contrat : les documents doivent respecter le schéma déclaré, comme une table SQL.
  
 ---
+ 
+## Partie 2 — Ingestion en Python
+ 
+### Exercice 2.2 — Idempotence et identifiants
+ 
+**Le nombre de documents a-t-il doublé ?**
+Non. Après une première ingestion avec `--reset` (5 000 documents), j'ai relancé `python ingest.py` sans `--reset` : le script a conservé l'index existant, a de nouveau envoyé 5 000 documents sans erreur, et le comptage final est toujours **5 000**. Les documents ont été remplacés, pas ajoutés : l'ingestion est idempotente.
+ 
+**Pourquoi fixer `_id` à partir du champ `id` est-il essentiel ?**
+Dans `lire_actions()`, chaque action a `"_id": doc["id"]` (par exemple `OFF-00002`). L'action `index` du bulk fonctionne alors comme un `PUT offres/_doc/OFF-00002` : si un document avec cet `_id` existe déjà, il est remplacé (sa `_version` augmente), sinon il est créé. Un même identifiant métier donne donc toujours le même document dans l'index.
+C'est ce qui permet de relancer le script sans risque : après une panne au milieu de l'ingestion, une correction des données source ou une mise à jour quotidienne, on réexécute simplement le script et l'index reflète la source, sans doublons.
+ 
+**Que se passerait-il avec des identifiants générés par Elasticsearch ?**
+Sans `_id` fourni, chaque document reçoit un identifiant aléatoire (comme `jXms7KABo-WI-xxS2rv6` à l'exercice 1.2). Elasticsearch ne peut pas savoir qu'une offre a déjà été indexée : chaque relance crée 5 000 nouveaux documents. Après deux exécutions, l'index contiendrait 10 000 documents, chaque offre en double ; les recherches afficheraient deux fois les mêmes résultats et les agrégations (comptages par ville, moyennes) seraient faussées. Il faudrait alors vider et recharger l'index à chaque fois.
+ 
+### Exercice 2.3 — Provoquer une erreur de mapping
+ 
+**Le lot entier est-il rejeté ou seulement ce document ?**
+Seulement ce document. J'ai ajouté à la fin de `data/offres.ndjson` une offre `OFF-99999` avec un champ `"prime": 3000` absent du mapping, puis relancé `python ingest.py`. Sortie :
+ 
+```
+5000 documents indexés, 1 erreurs
+  - index OFF-99999 : strict_dynamic_mapping_exception — mapping set to strict, dynamic introduction of [prime] within [_doc] is not allowed
+5000 documents dans 'offres'
+```
+ 
+Le fichier contenait 5 001 lignes : les 5 000 offres valides ont été indexées, seule `OFF-99999` a été refusée à cause du mapping `strict`. Ce document faisait partie du dernier paquet de 1 000 (`chunk_size=1000`) ; les 999 autres documents de ce paquet sont bien passés. L'API `_bulk` n'est pas transactionnelle : elle renvoie un statut par opération, et un échec n'annule pas les autres.
+ 
+**Intérêt de `raise_on_error=False` pour un pipeline ?**
+Avec la valeur par défaut (`True`), `helpers.bulk` lève une exception `BulkIndexError` dès qu'un paquet contient une erreur : le script s'arrête, la suite du fichier n'est pas envoyée, et on ne sait pas facilement ce qui a été chargé ou non.
+Avec `raise_on_error=False`, le pipeline va jusqu'au bout : un document mal formé parmi des milliers ne bloque pas l'ingestion des autres. `helpers.bulk` renvoie le nombre de succès et la liste détaillée des erreurs (identifiant du document, type et raison de l'erreur), que mon script affiche. On peut ensuite les journaliser, les mettre de côté pour correction et les réinjecter plus tard. Comme l'ingestion est idempotente, relancer après correction ne crée pas de doublons.
+La contrepartie : il faut vérifier et surveiller ces erreurs, sinon des données peuvent manquer sans que personne ne s'en aperçoive.
+ 
+---
