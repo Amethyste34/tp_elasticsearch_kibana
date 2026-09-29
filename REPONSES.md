@@ -203,5 +203,74 @@ Au-delà, on utilise **`search_after`** avec un **point in time (PIT)** :
 - chaque requête trie sur un critère stable et unique (par exemple le score puis un identifiant) et passe dans `search_after` les valeurs `sort` du dernier résultat de la page précédente ;
 - Elasticsearch reprend juste après ce document, sans recalculer les pages précédentes : le coût reste constant quelle que soit la profondeur.
 Inconvénient : on ne peut plus sauter directement à la page 50, on avance page après page (pagination « page suivante »), ce qui convient aux exports, aux traitements par lots et aux défilements infinis.
- 
+
 ---
+ 
+## Partie 4 — Agrégations
+ 
+### Exercice 4.1 — Offres et salaire moyen par ville
+ 
+**Quelle ville a le salaire moyen le plus élevé ?**
+**Paris**, avec un `salaire_min` moyen de **57 442 €**, nettement devant Grenoble (53 046 €) et Nantes (52 125 €). Les autres villes se tiennent entre 50 000 et 52 000 €, et Nice est dernière (49 456 €). On retrouve la majoration des salaires parisiens annoncée dans la description du jeu de données.
+ 
+**Sur combien d'offres la moyenne est-elle réellement calculée ?**
+Pas sur `doc_count`. Une agrégation `avg` ignore les documents où le champ est absent ; or `salaire_min` n'existe pas pour les alternances, stages et freelances. J'ai ajouté une agrégation `value_count` sur `salaire_min`, qui compte les documents ayant une valeur :
+- sur tout l'index : **3 389 offres** ont un salaire, sur 5 000 ;
+- pour Paris : la moyenne porte sur **994 offres**, alors que `doc_count` en annonce 1 492 (498 offres parisiennes sans salaire) ;
+- de même pour Grenoble, 65 sur 90, et pour Nice, 79 sur 111.
+Un champ absent n'est pas un zéro : s'il valait 0, la moyenne serait fortement tirée vers le bas. C'est pour cela que le générateur omet le champ plutôt que de mettre 0 ou `null`.
+ 
+**Erreur en remplaçant `ville` par `titre`, et correction ?**
+Erreur **400**, `illegal_argument_exception` : « Fielddata is disabled on [titre] ». Un champ `text` n'est pas prévu pour les agrégations et les tris : l'index inversé associe chaque token aux documents, mais pas l'inverse (document → valeur). De plus, il ne contient que des tokens analysés (`administrateur`, `bas`, `done`…) : même en activant `fielddata`, on obtiendrait des paquets par mot et non par titre, avec un coût mémoire élevé.
+Correction : agréger sur le sous-champ `keyword` **`titre.brut`**, déclaré dans le mapping exactement pour cela. Les paquets correspondent alors aux titres complets.
+Remarque : avec le tri par salaire moyen décroissant, les premiers paquets sont les titres « (Alternance) » et « (Stage) », dont la moyenne vaut `null` (aucune offre avec salaire). Pour obtenir un classement utile, j'ai ajouté `"query": {"exists": {"field": "salaire_min"}}` afin de n'agréger que les offres qui ont un salaire. Le champ `doc_count_error_upper_bound: -1` signale aussi qu'un tri `terms` sur une sous-agrégation est approximatif : Elasticsearch ne garantit pas l'ordre exact quand il y a plus de paquets que `size`.
+
+### Exercice 4.2 — Publications par mois
+
+*(Pas de question dans l'énoncé : observations.)*
+
+Le `date_histogram` mensuel sur `date_publication` donne 6 paquets, d'avril à septembre 2026 :
+
+| Mois | Offres | dont CDI | Alternance | CDD | Freelance | Stage |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-04 | 763 | 443 | 114 | 76 | 92 | 38 |
+| 2026-05 | 865 | 476 | 127 | 105 | 103 | 54 |
+| 2026-06 | 820 | 461 | 125 | 102 | 94 | 38 |
+| 2026-07 | 835 | 459 | 135 | 100 | 108 | 33 |
+| 2026-08 | **880** | 476 | 134 | 119 | 108 | 43 |
+| 2026-09 | 837 | 460 | 119 | 112 | 108 | 38 |
+
+- Août est le mois le plus chargé (880 offres), avril le plus faible (763) ; la publication est globalement régulière, autour de 830 offres par mois. Le total fait bien 5 000.
+- La ventilation par `contrat` se fait avec une agrégation `terms` imbriquée dans le `date_histogram` : chaque mois devient un paquet, redécoupé par type de contrat. Le CDI domine chaque mois (environ 55 %), puis l'alternance ; le stage reste le plus rare.
+- `"format": "yyyy-MM"` rend la clé lisible (`key_as_string`) ; `key` reste la date en millisecondes depuis 1970, utile pour un programme.
+
+### Exercice 4.3 — Tranches de salaire et statistiques
+
+*(Pas de question dans l'énoncé : observations.)*
+
+Agrégation `range` sur `salaire_min` :
+
+| Tranche | Offres |
+| --- | --- |
+| < 40 k | 484 |
+| 40–55 k | 1 363 |
+| ≥ 55 k | 1 542 |
+
+- Le total des tranches fait **3 389** : exactement le nombre d'offres qui ont un `salaire_min` (exercice 4.1). Les offres sans salaire n'entrent dans aucune tranche.
+- Dans une `range`, `from` est inclus et `to` exclu : une offre à 40 000 € exactement tombe dans « 40–55 k », pas dans « < 40 k ». Les tranches ne se chevauchent donc pas.
+- Près de la moitié des offres avec salaire (1 542) proposent au moins 55 000 € de salaire minimum.
+
+Agrégation `stats` sur `experience_annees` : en une seule agrégation, on obtient **count 5 000**, **min 0**, **max 15**, **moyenne 5,9 ans**, somme 29 564. Toutes les offres ont ce champ (count = 5 000), contrairement au salaire.
+
+### Exercice 4.4 — Requête + agrégation
+
+J'ai sélectionné les offres avec `"match_phrase": {"titre": "Data Engineer"}` (les deux mots doivent se suivre dans le titre) : **462 offres**, tous niveaux et contrats confondus (y compris « Data Engineer (Alternance) » et « (Stage) »).
+
+- **5 compétences les plus demandées** (agrégation `terms` sur `competences`, `size: 5`) : **Airflow** (315), **Spark** (313), **Kafka** (312), **Python** (311), **SQL** (301). Le cœur du métier : orchestration, traitement distribué, streaming, programmation et bases de données.
+- **Télétravail le plus fréquent** (`terms` sur `teletravail`, `size: 1`) : **partiel**, pour 284 offres sur 462 (61 %) ; les 178 autres (`sum_other_doc_count`) se partagent entre `aucun` et `total`.
+
+L'agrégation sur `competences` fonctionne directement parce que le champ est un `keyword` : chaque compétence de la liste est un paquet exact, sans passer par l'analyseur.
+
+**L'agrégation porte-t-elle sur tout l'index ou sur les résultats de la requête ?**
+Seulement sur les résultats de la requête. `hits.total.value` vaut **462**, et non 5 000 : les agrégations ont été calculées sur ces 462 offres « Data Engineer » uniquement. On le vérifie aussi avec les compétences : Airflow, Spark et Kafka sont spécifiques aux métiers de la donnée ; sur tout l'index, elles ne seraient pas forcément en tête (des compétences comme Linux ou Python, communes à plusieurs métiers, pèseraient davantage).
+C'est le fonctionnement général : `query` sélectionne les documents, puis `aggs` calcule ses statistiques sur cette sélection, en un seul aller-retour. C'est ce qui permet les facettes d'un moteur de recherche : après une recherche, on affiche le nombre de résultats par ville ou par contrat pour cette recherche précise. Pour obtenir un chiffre sur tout l'index dans la même requête, il faudrait une agrégation `global`.

@@ -1,0 +1,156 @@
+# =====================================================================
+# Partie 4 — Agrégations
+# Requêtes Kibana Dev Tools (à exécuter une par une : curseur sur la
+# ligne GET, puis Ctrl+Entrée)
+# "size": 0 -> pas de liste d'offres, seulement les statistiques
+# =====================================================================
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.1 — Offres et salaire moyen par ville
+# ---------------------------------------------------------------------
+
+# Regroupement terms sur ville (keyword), moyenne de salaire_min dans
+# chaque paquet, paquets triés par salaire moyen décroissant
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "par_ville": {
+      "terms": { "field": "ville", "size": 12, "order": { "salaire_moyen": "desc" } },
+      "aggs": { "salaire_moyen": { "avg": { "field": "salaire_min" } } }
+    }
+  }
+}
+
+# Sur combien d'offres la moyenne est-elle réellement calculée ?
+# value_count compte les documents qui ont une valeur pour salaire_min
+# (le champ est absent pour alternance, stage et freelance)
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "offres_avec_salaire": { "value_count": { "field": "salaire_min" } },
+    "par_ville": {
+      "terms": { "field": "ville", "size": 12, "order": { "salaire_moyen": "desc" } },
+      "aggs": {
+        "salaire_moyen": { "avg": { "field": "salaire_min" } },
+        "nb_salaires":   { "value_count": { "field": "salaire_min" } }
+      }
+    }
+  }
+}
+
+# Même agrégation sur titre (champ text) : erreur 400
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "par_titre": {
+      "terms": { "field": "titre", "size": 12, "order": { "salaire_moyen": "desc" } },
+      "aggs": { "salaire_moyen": { "avg": { "field": "salaire_min" } } }
+    }
+  }
+}
+
+# Correction : agréger sur le sous-champ keyword titre.brut
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "par_titre": {
+      "terms": { "field": "titre.brut", "size": 12, "order": { "salaire_moyen": "desc" } },
+      "aggs": { "salaire_moyen": { "avg": { "field": "salaire_min" } } }
+    }
+  }
+}
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.2 — Publications par mois
+# ---------------------------------------------------------------------
+
+# Nombre d'offres publiées par mois
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "par_mois": {
+      "date_histogram": {
+        "field": "date_publication",
+        "calendar_interval": "month",
+        "format": "yyyy-MM"
+      }
+    }
+  }
+}
+
+# Chaque mois ventilé par type de contrat (agrégation imbriquée)
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "par_mois": {
+      "date_histogram": {
+        "field": "date_publication",
+        "calendar_interval": "month",
+        "format": "yyyy-MM"
+      },
+      "aggs": {
+        "par_contrat": { "terms": { "field": "contrat" } }
+      }
+    }
+  }
+}
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.3 — Tranches de salaire et statistiques
+# ---------------------------------------------------------------------
+
+# range : "from" est inclus, "to" est exclu
+# stats : count, min, max, avg, sum en une seule agrégation
+GET offres/_search
+{
+  "size": 0,
+  "aggs": {
+    "tranches_salaire": {
+      "range": {
+        "field": "salaire_min",
+        "ranges": [
+          { "key": "< 40 k",   "to": 40000 },
+          { "key": "40–55 k",  "from": 40000, "to": 55000 },
+          { "key": "≥ 55 k",   "from": 55000 }
+        ]
+      }
+    },
+    "experience": { "stats": { "field": "experience_annees" } }
+  }
+}
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.4 — Requête + agrégation
+# ---------------------------------------------------------------------
+
+# Les agrégations ne portent que sur les documents sélectionnés par "query"
+# match_phrase : "data" et "engineer" doivent se suivre dans le titre
+GET offres/_search
+{
+  "size": 0,
+  "query": { "match_phrase": { "titre": "Data Engineer" } },
+  "aggs": {
+    "top_competences": { "terms": { "field": "competences", "size": 5 } },
+    "teletravail":     { "terms": { "field": "teletravail", "size": 1 } }
+  }
+}
+
+
+# ---------------------------------------------------------------------
+# Bonus — Équivalent ES|QL de l'exercice 4.1
+# ---------------------------------------------------------------------
+
+POST _query?format=txt
+{
+  "query": "FROM offres | STATS salaire_moyen = AVG(salaire_min) BY ville | SORT salaire_moyen DESC"
+}
