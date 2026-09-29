@@ -122,3 +122,86 @@ Avec `raise_on_error=False`, le pipeline va jusqu'au bout : un document mal form
 La contrepartie : il faut vérifier et surveiller ces erreurs, sinon des données peuvent manquer sans que personne ne s'en aperçoive.
  
 ---
+ 
+## Partie 3 — Recherche et analyseurs
+ 
+### Exercice 3.1 — Voir travailler un analyseur
+ 
+**Quels mots disparaissent avec `french` ?**
+Avec l'analyseur `standard`, la phrase « Les développeuses travaillaient sur l'analyse des données » donne 7 tokens : `les`, `développeuses`, `travaillaient`, `sur`, `l'analyse`, `des`, `données`. Il découpe sur les espaces et met en minuscules, sans rien supprimer.
+Avec `french`, il ne reste que 4 tokens : `developeu`, `travailaient`, `analys`, `done`. Les **mots vides** `les`, `sur` et `des` ont disparu : très fréquents en français, ils n'aident pas à distinguer les documents. Les positions sont conservées (1, 2, 4, 6) : les trous correspondent aux mots supprimés, ce qui permet encore les recherches de phrase (`match_phrase`).
+Les mots restants sont aussi transformés par la **racinisation** : accents retirés, doubles lettres simplifiées, terminaisons coupées (`développeuses` → `developeu`, `travaillaient` → `travailaient`, `données` → `done`). Ces racines ne sont pas de vrais mots : ce sont des clés de comparaison.
+ 
+**Que devient `l'analyse` ?**
+- Avec `standard`, `l'analyse` reste un seul token, apostrophe comprise : une recherche sur « analyse » ne le retrouverait pas.
+- Avec `french`, le filtre d'**élision** supprime `l'`, puis la racinisation réduit `analyse` à `analys`. « analyse », « analyses », « l'analyse » ou « d'analyse » donnent tous le même token.
+**« donnée » et « données » donnent-ils le même terme avec chaque analyseur ? Conséquence pour la recherche ?**
+- `standard` : deux tokens différents, `donnée` et `données`. Une recherche sur « donnée » ne trouve pas un document qui contient « données ».
+- `french` : le même token `done` dans les deux cas. Singulier et pluriel correspondent.
+Conséquence : le choix de l'analyseur détermine ce qu'une recherche retrouve. Pour un texte en français, l'analyseur `french` rend la recherche tolérante aux variations grammaticales (singulier/pluriel, féminin, élisions, accents) et ignore les mots vides qui n'apportent rien au score. C'est pourquoi j'ai déclaré `"analyzer": "french"` sur `titre`, `description` et `competences.texte` dans le mapping : l'analyseur est appliqué à l'indexation **et** à la question, donc les deux côtés sont réduits aux mêmes racines.
+La contrepartie : la racinisation peut rapprocher des mots sans rapport qui ont la même racine, et elle ne convient pas aux identifiants ou codes exacts, qui restent en `keyword`.
+
+ 
+### Exercice 3.2 — `match` contre `term`
+ 
+**Pourquoi les deux requêtes `term` renvoient-elles 0 résultat ? Correction ?**
+Une requête `term` ne passe pas par l'analyseur : elle cherche la valeur exacte, telle quelle, dans l'index inversé.
+- `{"term": {"ville": "paris"}}` → 0 résultat. `ville` est un `keyword`, stocké exactement comme dans le document : `Paris`, avec une majuscule. La comparaison est sensible à la casse, donc `paris` ne correspond à rien.
+  Correction : `{"term": {"ville": "Paris"}}` → **1 492 offres**.
+- `{"term": {"titre": "Data Engineer Senior"}}` → 0 résultat. `titre` est un `text` analysé en `french` : l'index ne contient que des tokens en minuscules et réduits à leur racine, un par mot, jamais la phrase complète. Aucun token n'est égal à `Data Engineer Senior`.
+  Correction : viser le sous-champ `keyword`, `{"term": {"titre.brut": "Data Engineer Senior"}}` → **103 offres**.
+Règle : `term` sur les champs `keyword`, numériques ou dates (valeurs exactes) ; `match` sur les champs `text` (la question est analysée comme les documents).
+ 
+**Effet de `"operator": "and"` sur le nombre de résultats ?**
+- Par défaut, `match` sur « projets bancaires » cherche les tokens `projet` **OU** `bancair` : **4 190 résultats**. Presque toutes les descriptions contiennent « projets », donc la requête ramène la majorité de l'index ; les offres qui ont les deux mots sont simplement mieux classées (score plus élevé).
+- Avec `"operator": "and"`, les deux tokens sont obligatoires : **393 résultats**, uniquement les offres qui parlent de projets bancaires.
+`or` favorise le rappel (on ne rate rien, mais beaucoup de bruit) ; `and` favorise la précision (moins de résultats, plus pertinents). Entre les deux, `minimum_should_match` permet d'exiger un pourcentage des mots.
+
+ 
+### Exercice 3.3 — Plusieurs champs, pondération et fautes de frappe
+ 
+**Quel paramètre rattrape la faute ?**
+`"fuzziness": "AUTO"`. Sans lui, la recherche « kubernetis terraform » sur `titre`, `competences.texte` et `description` renvoie **739 offres** : « kubernetis » ne correspond à aucun token de l'index, seul « terraform » trouve des résultats.
+Avec `"fuzziness": "AUTO"`, on passe à **969 offres**. Elasticsearch accepte des termes proches, mesurés en distance d'édition (nombre de lettres à ajouter, supprimer, remplacer ou inverser). En mode `AUTO`, la tolérance dépend de la longueur du mot : 0 erreur jusqu'à 2 caractères, 1 erreur de 3 à 5, 2 erreurs au-delà. « kubernetis » (10 lettres) est à une seule substitution de « kubernetes » : il le retrouve, ce qui ajoute les 230 offres qui parlent de Kubernetes sans Terraform.
+La contrepartie : la recherche floue est plus coûteuse, et elle peut rapprocher des mots différents mais proches à l'écrit.
+ 
+**Comment évolue l'ordre des résultats avec le poids sur `titre` ?**
+Le nombre de résultats ne change pas (**969** avec et sans `titre^3`) : un poids ne filtre rien, il multiplie seulement la contribution d'un champ au score, et donc modifie l'ordre.
+Ici, l'effet est nul en pratique : le premier résultat est le même dans les deux cas (« Architecte Cloud Lead », compétences Kubernetes, Sécurité, Terraform). La raison : les titres du corpus sont des noms de métier (« Architecte Cloud Lead », « Ingénieur DevOps Senior »…) et ne contiennent jamais « kubernetes » ni « terraform ». Le champ `titre` n'apporte aucun point au score, et multiplier zéro par 3 donne toujours zéro. Les correspondances viennent de `competences.texte` et `description`.
+Le poids `titre^3` aurait un effet visible sur une recherche dont les mots apparaissent dans les titres, par exemple « architecte cloud » : les offres dont le titre contient ces mots remonteraient devant celles qui ne les citent que dans la description. Par défaut, `multi_match` (type `best_fields`) retient le score du meilleur champ pour chaque document : c'est ce score que le poids amplifie.
+ 
+### Exercice 3.4 — Requête `bool`
+ 
+**Comparaison des `_score` avec et sans le bloc `should` ?**
+Les deux requêtes renvoient **25 offres** : `should` ne change pas le nombre de résultats. Quand un `bool` contient déjà un `must` ou un `filter`, la clause `should` n'est pas obligatoire, elle n'ajoute qu'un bonus de score.
+Les 25 offres sont toutes des « Administrateur Bases de Données » (CDI, Montpellier ou Toulouse, salaire max ≥ 50 000, télétravail partiel ou total) : le mot « données » est dans leur titre.
+ 
+- **Sans `should`** : toutes les offres ont le même score, **2,048**. Il ne vient que du `must` (le `multi_match` sur « données ») ; comme leurs titres sont presque identiques, le score ne les distingue pas. À égalité, elles sortent dans l'ordre interne de l'index : des offres avec Elasticsearch (OFF-00024, OFF-00065) et sans (OFF-00041, OFF-00072) sont mélangées.
+- **Avec `should`** : les offres qui ont `Elasticsearch` dans leurs compétences passent à **4,014**, soit 2,048 + environ 1,97 de bonus apporté par le `term` sur `competences`. Elles remontent toutes en tête ; les offres sans Elasticsearch restent à 2,048 et passent derrière.
+Le `should` sert donc à classer, pas à filtrer : une offre sans Elasticsearch n'est pas exclue, elle est seulement moins bien placée.
+ 
+**Pourquoi placer les critères exacts dans `filter` plutôt que dans `must` (deux raisons) ?**
+1. **Pas de score parasite.** En contexte filtre, Elasticsearch répond seulement oui ou non, sans calculer de score. Si « CDI », « Toulouse » ou « salaire ≥ 50 000 » étaient dans `must`, ils ajouteraient des points au score alors qu'ils ne mesurent pas la pertinence : toutes les offres retenues les remplissent de la même façon. Le classement doit dépendre uniquement de la recherche texte (`must`) et des bonus voulus (`should`). Ici, le score sans `should` (2,048) vient uniquement de « données ».
+2. **Performance et cache.** Sans calcul de score, un filtre est moins coûteux. Surtout, son résultat (la liste des documents qui vérifient `contrat = CDI`, par exemple) peut être mis en cache et réutilisé par les requêtes suivantes, ce qui est très utile pour des critères qui reviennent souvent, comme les facettes d'un moteur de recherche.
+
+### Exercice 3.5 — Recherche géographique
+ 
+*(Pas de question dans l'énoncé : observations.)*
+ 
+- La requête renvoie **340 offres** à moins de 20 km de Montpellier (43.6108, 3.8767), toutes situées à Montpellier : aucune autre ville du corpus n'est dans ce rayon, et les localisations sont générées dans un rayon d'environ 5 km autour de chaque centre-ville.
+- Les résultats sont triés de la plus proche à la plus lointaine. La valeur de `sort` donne la distance en kilomètres (`"unit": "km"`) : 0,19 km pour la première offre (Développeur Java Confirmé, Cévennes Data), puis 0,22 km, 0,32 km…
+- `_score` et `max_score` valent `null` : le `geo_distance` est dans un `filter` (oui/non, pas de score) et le tri se fait sur la distance, pas sur la pertinence. Elasticsearch ne calcule donc aucun score.
+- Cette recherche fonctionne parce que `localisation` est déclaré en `geo_point` dans le mapping : un simple objet `{lat, lon}` en mapping dynamique aurait été indexé comme deux nombres séparés, inutilisables pour une distance.
+### Exercice 3.6 — Pagination et surlignage
+ 
+**Pourquoi `from` + `size` est-il limité à 10 000, et quelle API utiliser au-delà ?**
+Avec `from` et `size`, Elasticsearch ne sait pas « sauter » directement à la page demandée : pour afficher les résultats 9 990 à 10 000, chaque shard doit calculer et trier ses `from + size` meilleurs documents, puis le nœud qui coordonne la requête fusionne toutes ces listes et jette tout ce qui précède `from`. Le coût en mémoire et en CPU augmente avec la profondeur de la page, et il est multiplié par le nombre de shards. Pour protéger le cluster, le réglage `index.max_result_window` limite `from + size` à 10 000 par défaut ; au-delà, la requête est refusée.
+De toute façon, un utilisateur ne parcourt jamais des milliers de pages : cette limite concerne surtout les traitements qui veulent parcourir tous les résultats.
+ 
+Au-delà, on utilise **`search_after`** avec un **point in time (PIT)** :
+- `POST offres/_pit?keep_alive=1m` crée un instantané figé de l'index : les pages restent cohérentes même si des documents sont ajoutés ou supprimés pendant le parcours ;
+- chaque requête trie sur un critère stable et unique (par exemple le score puis un identifiant) et passe dans `search_after` les valeurs `sort` du dernier résultat de la page précédente ;
+- Elasticsearch reprend juste après ce document, sans recalculer les pages précédentes : le coût reste constant quelle que soit la profondeur.
+Inconvénient : on ne peut plus sauter directement à la page 50, on avance page après page (pagination « page suivante »), ce qui convient aux exports, aux traitements par lots et aux défilements infinis.
+ 
+---

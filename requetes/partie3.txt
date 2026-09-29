@@ -1,0 +1,197 @@
+# =====================================================================
+# Partie 3 — Recherche et analyseurs
+# Requêtes Kibana Dev Tools (à exécuter une par une : curseur sur la
+# ligne GET/POST, puis Ctrl+Entrée)
+# =====================================================================
+
+
+# ---------------------------------------------------------------------
+# Exercice 3.1 — Voir travailler un analyseur
+# ---------------------------------------------------------------------
+
+# Analyseur standard : découpe + minuscules, rien n'est supprimé
+POST _analyze
+{ "analyzer": "standard", "text": "Les développeuses travaillaient sur l'analyse des données" }
+
+# Analyseur french : mots vides supprimés, élision (l'), racinisation
+POST _analyze
+{ "analyzer": "french", "text": "Les développeuses travaillaient sur l'analyse des données" }
+
+# Singulier / pluriel avec standard : deux tokens différents
+POST _analyze
+{ "analyzer": "standard", "text": "donnée" }
+
+POST _analyze
+{ "analyzer": "standard", "text": "données" }
+
+# Singulier / pluriel avec french : même token "done"
+POST _analyze
+{ "analyzer": "french", "text": "donnée" }
+
+POST _analyze
+{ "analyzer": "french", "text": "données" }
+
+
+# ---------------------------------------------------------------------
+# Exercice 3.2 — match contre term
+# ---------------------------------------------------------------------
+
+# match (OU par défaut) : 4 190 résultats
+GET offres/_search
+{ "query": { "match": { "description": "projets bancaires" } } }
+
+# term sur un keyword avec la mauvaise casse : 0 résultat
+GET offres/_search
+{ "query": { "term": { "ville": "paris" } } }
+
+# term sur un champ text analysé : 0 résultat
+GET offres/_search
+{ "query": { "term": { "titre": "Data Engineer Senior" } } }
+
+# Correction 1 : valeur exacte, avec la majuscule -> 1 492 résultats
+GET offres/_search
+{ "query": { "term": { "ville": "Paris" } } }
+
+# Correction 2 : sous-champ keyword titre.brut -> 103 résultats
+GET offres/_search
+{ "query": { "term": { "titre.brut": "Data Engineer Senior" } } }
+
+# match avec operator "and" : les deux mots obligatoires -> 393 résultats
+GET offres/_search
+{ "query": { "match": { "description": { "query": "projets bancaires", "operator": "and" } } } }
+
+
+# ---------------------------------------------------------------------
+# Exercice 3.3 — Plusieurs champs, pondération et fautes de frappe
+# ---------------------------------------------------------------------
+
+# 1. multi_match sans tolérance : "kubernetis" (faute) ne correspond à rien
+GET offres/_search
+{
+  "_source": ["titre", "competences"],
+  "query": { "multi_match": {
+    "query": "kubernetis terraform",
+    "fields": ["titre", "competences.texte", "description"] } }
+}
+
+# 2. fuzziness AUTO : rattrape la faute de frappe
+GET offres/_search
+{
+  "_source": ["titre", "competences"],
+  "query": { "multi_match": {
+    "query": "kubernetis terraform",
+    "fields": ["titre", "competences.texte", "description"],
+    "fuzziness": "AUTO" } }
+}
+
+# 3. fuzziness + poids x3 sur le titre
+GET offres/_search
+{
+  "_source": ["titre", "competences"],
+  "query": { "multi_match": {
+    "query": "kubernetis terraform",
+    "fields": ["titre^3", "competences.texte", "description"],
+    "fuzziness": "AUTO" } }
+}
+
+
+# ---------------------------------------------------------------------
+# Exercice 3.4 — Requête bool
+# ---------------------------------------------------------------------
+
+# Avec le bloc should (bonus de score si la compétence Elasticsearch est présente)
+GET offres/_search
+{
+  "_source": ["titre", "ville", "contrat", "teletravail", "salaire_max", "competences"],
+  "query": {
+    "bool": {
+      "must": [
+        { "multi_match": { "query": "données", "fields": ["titre", "description"] } }
+      ],
+      "filter": [
+        { "term":  { "contrat": "CDI" } },
+        { "terms": { "ville": ["Montpellier", "Toulouse"] } },
+        { "range": { "salaire_max": { "gte": 50000 } } }
+      ],
+      "must_not": [
+        { "term": { "teletravail": "aucun" } }
+      ],
+      "should": [
+        { "term": { "competences": "Elasticsearch" } }
+      ]
+    }
+  }
+}
+
+# Même requête sans le bloc should, pour comparer les _score
+GET offres/_search
+{
+  "_source": ["titre", "ville", "contrat", "teletravail", "salaire_max", "competences"],
+  "query": {
+    "bool": {
+      "must": [
+        { "multi_match": { "query": "données", "fields": ["titre", "description"] } }
+      ],
+      "filter": [
+        { "term":  { "contrat": "CDI" } },
+        { "terms": { "ville": ["Montpellier", "Toulouse"] } },
+        { "range": { "salaire_max": { "gte": 50000 } } }
+      ],
+      "must_not": [
+        { "term": { "teletravail": "aucun" } }
+      ]
+    }
+  }
+}
+
+
+# ---------------------------------------------------------------------
+# Exercice 3.5 — Recherche géographique
+# ---------------------------------------------------------------------
+
+# Offres à moins de 20 km de Montpellier, de la plus proche à la plus lointaine
+GET offres/_search
+{
+  "_source": ["titre", "entreprise", "ville"],
+  "query": { "bool": { "filter": { "geo_distance": {
+    "distance": "20km", "localisation": { "lat": 43.6108, "lon": 3.8767 } } } } },
+  "sort": [ { "_geo_distance": {
+    "localisation": { "lat": 43.6108, "lon": 3.8767 }, "order": "asc", "unit": "km" } } ]
+}
+
+
+# ---------------------------------------------------------------------
+# Exercice 3.6 — Pagination et surlignage
+# ---------------------------------------------------------------------
+
+# Requête 3.4, page 2 par pages de 5 (from = (page - 1) x size = 5),
+# _source limité, extraits surlignés.
+# Le surlignage ne renvoie un extrait que pour un champ où les mots ont été
+# trouvés : ici « données » est dans le titre, d'où titre + description.
+GET offres/_search
+{
+  "from": 5,
+  "size": 5,
+  "_source": ["titre", "entreprise", "ville"],
+  "query": {
+    "bool": {
+      "must": [
+        { "multi_match": { "query": "données", "fields": ["titre", "description"] } }
+      ],
+      "filter": [
+        { "term":  { "contrat": "CDI" } },
+        { "terms": { "ville": ["Montpellier", "Toulouse"] } },
+        { "range": { "salaire_max": { "gte": 50000 } } }
+      ],
+      "must_not": [
+        { "term": { "teletravail": "aucun" } }
+      ],
+      "should": [
+        { "term": { "competences": "Elasticsearch" } }
+      ]
+    }
+  },
+  "highlight": {
+    "fields": { "titre": {}, "description": {} }
+  }
+}
