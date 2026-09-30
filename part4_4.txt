@@ -1,0 +1,56 @@
+{
+  "took": 24,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 462,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+  },
+  "aggregations": {
+    "top_competences": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 297,
+      "buckets": [
+        {
+          "key": "Airflow",
+          "doc_count": 315
+        },
+        {
+          "key": "Spark",
+          "doc_count": 313
+        },
+        {
+          "key": "Kafka",
+          "doc_count": 312
+        },
+        {
+          "key": "Python",
+          "doc_count": 311
+        },
+        {
+          "key": "SQL",
+          "doc_count": 301
+        }
+      ]
+    },
+    "teletravail": {
+      "doc_count_error_upper_bound": 0,
+      "sum_other_doc_count": 178,
+      "buckets": [
+        {
+          "key": "partiel",
+          "doc_count": 284
+        }
+      ]
+    }
+  }
+}

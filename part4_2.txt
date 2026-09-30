@@ -1,0 +1,266 @@
+# 1: GET offres/_search [200 OK]
+{
+  "took": 5,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 5000,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+  },
+  "aggregations": {
+    "par_mois": {
+      "buckets": [
+        {
+          "key_as_string": "2026-04",
+          "key": 1775001600000,
+          "doc_count": 763
+        },
+        {
+          "key_as_string": "2026-05",
+          "key": 1777593600000,
+          "doc_count": 865
+        },
+        {
+          "key_as_string": "2026-06",
+          "key": 1780272000000,
+          "doc_count": 820
+        },
+        {
+          "key_as_string": "2026-07",
+          "key": 1782864000000,
+          "doc_count": 835
+        },
+        {
+          "key_as_string": "2026-08",
+          "key": 1785542400000,
+          "doc_count": 880
+        },
+        {
+          "key_as_string": "2026-09",
+          "key": 1788220800000,
+          "doc_count": 837
+        }
+      ]
+    }
+  }
+}
+# 15: GET offres/_search [200 OK]
+{
+  "took": 5,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 5000,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+  },
+  "aggregations": {
+    "par_mois": {
+      "buckets": [
+        {
+          "key_as_string": "2026-04",
+          "key": 1775001600000,
+          "doc_count": 763,
+          "par_contrat": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "CDI",
+                "doc_count": 443
+              },
+              {
+                "key": "Alternance",
+                "doc_count": 114
+              },
+              {
+                "key": "Freelance",
+                "doc_count": 92
+              },
+              {
+                "key": "CDD",
+                "doc_count": 76
+              },
+              {
+                "key": "Stage",
+                "doc_count": 38
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2026-05",
+          "key": 1777593600000,
+          "doc_count": 865,
+          "par_contrat": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "CDI",
+                "doc_count": 476
+              },
+              {
+                "key": "Alternance",
+                "doc_count": 127
+              },
+              {
+                "key": "CDD",
+                "doc_count": 105
+              },
+              {
+                "key": "Freelance",
+                "doc_count": 103
+              },
+              {
+                "key": "Stage",
+                "doc_count": 54
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2026-06",
+          "key": 1780272000000,
+          "doc_count": 820,
+          "par_contrat": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "CDI",
+                "doc_count": 461
+              },
+              {
+                "key": "Alternance",
+                "doc_count": 125
+              },
+              {
+                "key": "CDD",
+                "doc_count": 102
+              },
+              {
+                "key": "Freelance",
+                "doc_count": 94
+              },
+              {
+                "key": "Stage",
+                "doc_count": 38
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2026-07",
+          "key": 1782864000000,
+          "doc_count": 835,
+          "par_contrat": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "CDI",
+                "doc_count": 459
+              },
+              {
+                "key": "Alternance",
+                "doc_count": 135
+              },
+              {
+                "key": "Freelance",
+                "doc_count": 108
+              },
+              {
+                "key": "CDD",
+                "doc_count": 100
+              },
+              {
+                "key": "Stage",
+                "doc_count": 33
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2026-08",
+          "key": 1785542400000,
+          "doc_count": 880,
+          "par_contrat": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "CDI",
+                "doc_count": 476
+              },
+              {
+                "key": "Alternance",
+                "doc_count": 134
+              },
+              {
+                "key": "CDD",
+                "doc_count": 119
+              },
+              {
+                "key": "Freelance",
+                "doc_count": 108
+              },
+              {
+                "key": "Stage",
+                "doc_count": 43
+              }
+            ]
+          }
+        },
+        {
+          "key_as_string": "2026-09",
+          "key": 1788220800000,
+          "doc_count": 837,
+          "par_contrat": {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": 0,
+            "buckets": [
+              {
+                "key": "CDI",
+                "doc_count": 460
+              },
+              {
+                "key": "Alternance",
+                "doc_count": 119
+              },
+              {
+                "key": "CDD",
+                "doc_count": 112
+              },
+              {
+                "key": "Freelance",
+                "doc_count": 108
+              },
+              {
+                "key": "Stage",
+                "doc_count": 38
+              }
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

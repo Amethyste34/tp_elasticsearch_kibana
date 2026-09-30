@@ -1,0 +1,47 @@
+{
+  "took": 5,
+  "timed_out": false,
+  "_shards": {
+    "total": 1,
+    "successful": 1,
+    "skipped": 0,
+    "failed": 0
+  },
+  "hits": {
+    "total": {
+      "value": 5000,
+      "relation": "eq"
+    },
+    "max_score": null,
+    "hits": []
+  },
+  "aggregations": {
+    "tranches_salaire": {
+      "buckets": [
+        {
+          "key": "< 40 k",
+          "to": 40000,
+          "doc_count": 484
+        },
+        {
+          "key": "40–55 k",
+          "from": 40000,
+          "to": 55000,
+          "doc_count": 1363
+        },
+        {
+          "key": "≥ 55 k",
+          "from": 55000,
+          "doc_count": 1542
+        }
+      ]
+    },
+    "experience": {
+      "count": 5000,
+      "min": 0,
+      "max": 15,
+      "avg": 5.9128,
+      "sum": 29564
+    }
+  }
+}
