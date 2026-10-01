@@ -825,3 +825,39 @@ Les écarts sont minimes : le trafic est réparti presque à parts égales entre
 Le classement dépend donc de la façon de regrouper : `useragent` distingue les versions ordinateur et mobile d'un même navigateur. En les regroupant par **famille**, Chrome (ordinateur et mobile, ≈ 8 100 requêtes) et Safari (Mac et iPhone, ≈ 8 250) arrivent largement en tête, devant Firefox (≈ 4 040).
  
 Une répartition aussi régulière est typique de données **générées** pour le TP ; sur un vrai site, Chrome dominerait nettement.
+ 
+## Partie 5 — Tableau de bord
+ 
+Capture : `captures/tableau-de-bord.png`.
+ 
+Tableau de bord **« Site de recrutement — trafic »**, construit avec Lens sur la data view *Logs web*, période du 23/09/2026 au 30/09/2026 :
+ 
+| Panneau | Type | Contenu | Valeur ou lecture |
+| --- | --- | --- | --- |
+| Requêtes | Indicateur | Nombre d'enregistrements | **20 700** |
+| Taux d'erreur serveur | Indicateur | Formule `count(kql='http.response.status_code >= 500') / count()`, format pourcentage | **1,97 %** (407 / 20 700) |
+| Trafic dans le temps | Barres verticales empilées | `@timestamp` en abscisse, répartition par `http.response.status_code` | pic de **404** le 26/09 (robot), pic de **503** le 28/09 (incident API) |
+| Offres les plus consultées | Tableau | Top 10 de `labels.offre_id` | OFF-03126 et OFF-04662 en tête (8) |
+| Navigateurs | Anneau | Top 5 de `user_agent.name` | Safari 20 %, Mobile Safari 19,8 %, Chrome 19,6 %, Chrome Mobile 19,6 %, Firefox 19,5 %, Other 1,45 % |
+| Offres par ville | Carte (Maps) | Calque *Documents* sur la data view `offres`, champ `localisation` | une offre = un point |
+ 
+Remarques :
+ 
+- Dans Kibana 9.5, l'**anneau** n'est plus un type distinct : c'est le type *Secteurs* avec l'option *Trou de l'anneau*.
+- La carte a été créée dans l'application **Maps** (calque *Documents*) puis ajoutée au tableau de bord. Le type Lens *Carte de région* ne convient pas : il colore des zones administratives à partir de leur nom, alors qu'on veut placer des points à partir d'un `geo_point`. Une data view `offres` a été créée sans champ temporel, l'index des offres n'étant pas horodaté.
+- Le tableau des offres compte **toutes** les requêtes sur chaque offre (consultations, candidatures, éventuelles erreurs), alors que l'exercice 4.4 ne retenait que les `GET` en 200 : le classement diffère légèrement (OFF-03126 y apparaît avec 8 requêtes). Un filtre `http.request.method : GET and http.response.status_code : 200` sur le panneau rendrait les deux identiques.
+- Le « Other » de l'anneau (1,45 %) correspond aux 300 requêtes du robot `zgrab` (exercice 4.3).
+**Interactivité.** Un clic sur la barre rose **503** du 28/09 propose deux filtres : `@timestamp` du 28/09 12:00 au 28/09 15:00 (la tranche de 3 heures de la barre) et `http.response.status_code` de 503 à 504 (champ numérique, donc exprimé en intervalle, équivalent à « = 503 »). Une fois appliqués, **tout le tableau de bord** se recentre sur l'incident : 402 requêtes, taux d'erreur à 100 %, une seule barre rose, et le tableau des offres devient **vide**, confirmant que l'incident n'a touché que l'API et aucune fiche d'offre (exercice 4.2). La carte se vide également : l'index `offres` ne possède pas le champ `http.response.status_code`, aucun de ses documents ne correspond au filtre.
+ 
+**Bonus — Pourquoi l'alerte ne se déclenche pas sur ces logs, et comment la tester ?**
+ 
+Une règle d'alerte (« plus de 50 réponses 5xx en 5 minutes ») s'exécute à intervalle régulier, par exemple toutes les minutes, et à chaque exécution elle n'examine que la **fenêtre de temps récente** : les 5 dernières minutes par rapport à l'heure **actuelle**. Nos logs sont datés du 23 au 29 septembre : quand la règle s'exécute le 1er octobre, la fenêtre ne contient aucun événement. L'incident du 28/09 (402 erreurs en 45 minutes, soit plus de 40 par tranche de 5 minutes, et au-delà de 50 sur certaines tranches) aurait déclenché l'alerte s'il s'était produit pendant que la règle tournait, mais une règle n'est pas rétroactive.
+ 
+Pour la tester :
+ 
+1. **Injecter des événements récents** : écrire dans `logs-web-default` des réponses 503 datées de maintenant, par exemple en ajoutant une soixantaine de lignes à un fichier de logs avec la date du jour (un petit script Python sur le modèle de `generate_access_logs.py`), ou en envoyant des documents directement avec l'API `_bulk` (avec `@timestamp` = maintenant, action `create`).
+2. **Attendre l'exécution suivante de la règle** (ou lancer une exécution manuelle depuis sa page) et vérifier le message dans les journaux de Kibana, puisque le connecteur *Server log* écrit dans le journal du serveur Kibana, ainsi que l'historique d'exécution de la règle.
+3. Autre approche, sans toucher aux données : **abaisser temporairement le seuil** ou élargir la fenêtre pour qu'elle couvre des événements existants. Mais une fenêtre de plusieurs jours n'a pas de sens pour une alerte en production : la vraie validation consiste à reproduire les conditions d'un incident, avec des données récentes.
+**Restitution — synthèse à présenter à l'équipe d'exploitation**
+ 
+> Sur la semaine du 23 au 29 septembre 2026, le site a reçu 20 700 requêtes (environ 2 960 par jour, dont 39 % depuis un mobile), avec un taux d'erreur serveur de 1,97 %. Ce taux est presque entièrement dû à un seul incident : le dimanche 28 septembre, de 14:00:08 à 14:44:56, l'API (`/api/…`) a renvoyé 402 réponses 503 sur 403 requêtes ; les pages du site et les candidatures n'ont pas été touchées. Pendant l'incident, le trafic sur l'API a été multiplié par 25 environ, signe de tentatives répétées des clients, avant de revenir à la normale dès le rétablissement. Par ailleurs, le samedi 26 septembre vers 05:12 (heure de Paris), le scanner automatique `zgrab` a sondé en 4 minutes 300 chemins sensibles (`/.env`, `/.git/config`, `/admin`…), sans succès : toutes ses requêtes ont reçu une 404. Actions proposées : identifier la cause racine de la panne de l'API, limiter le débit et espacer les tentatives des clients, mettre en place une alerte sur le taux de 5xx, et surveiller ou bloquer ce type de scanner au niveau du pare-feu applicatif.
