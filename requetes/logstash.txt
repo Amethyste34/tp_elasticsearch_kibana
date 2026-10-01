@@ -1,0 +1,52 @@
+# =====================================================================
+# TP2 — Logstash : mise en place
+# Requêtes Kibana Dev Tools
+# Le mot de passe réel est stocké uniquement dans .env (non versionné),
+# variable LOGSTASH_INTERNAL_PASSWORD.
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# Étape 2 — Vérifier que l'index offres existe avec son mapping strict
+# ---------------------------------------------------------------------
+GET offres/_count
+
+GET offres/_mapping
+
+# ---------------------------------------------------------------------
+# Étape 3 — Rôle à moindres privilèges pour Logstash
+#   cluster : supervision + gestion des modèles d'index
+#   index   : écriture uniquement, sur offres et logs-web-*
+# ---------------------------------------------------------------------
+POST _security/role/logstash_writer
+{
+  "cluster": ["monitor", "manage_index_templates"],
+  "indices": [
+    { "names": ["offres", "logs-web-*"],
+      "privileges": ["write", "create", "create_index", "auto_configure"] }
+  ]
+}
+
+# ---------------------------------------------------------------------
+# Étape 3 — Utilisateur dédié portant ce rôle
+#   Remplacer <LOGSTASH_INTERNAL_PASSWORD> par la valeur de .env
+# ---------------------------------------------------------------------
+POST _security/user/logstash_internal
+{ "password": "<LOGSTASH_INTERNAL_PASSWORD>", "roles": ["logstash_writer"],
+  "full_name": "Logstash - ingestion" }
+
+# ---------------------------------------------------------------------
+# Vérifications
+# ---------------------------------------------------------------------
+GET _security/role/logstash_writer
+
+GET _security/user/logstash_internal
+
+# Test d'authentification depuis Git Bash (hors Dev Tools) :
+#   curl -s -u logstash_internal:<LOGSTASH_INTERNAL_PASSWORD> \
+#     "http://localhost:9200/_security/_authenticate?pretty"
+#   -> username logstash_internal, roles [logstash_writer], enabled true
+#
+# Test de lecture (doit échouer) :
+#   curl -s -u logstash_internal:<LOGSTASH_INTERNAL_PASSWORD> \
+#     "http://localhost:9200/offres/_count"
+#   -> 403 security_exception : le rôle n'a pas le privilège read sur offres
