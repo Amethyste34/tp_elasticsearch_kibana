@@ -1,0 +1,162 @@
+# =====================================================================
+# TP2 — Partie 4 : enquête dans Kibana
+# Data view "Logs web" sur logs-web-* ; période absolue :
+#   23/09/2026 00:00 -> 30/09/2026 00:00 (heure de Paris)
+# Requêtes ES|QL exécutées dans Discover (mode ES|QL).
+# Dans les clauses WHERE, les dates sont en UTC (suffixe Z) :
+#   14:00 à Paris (UTC+2) = 12:00Z.
+# =====================================================================
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.1 — Vue d'ensemble
+# ---------------------------------------------------------------------
+
+# Répartition par code HTTP
+FROM logs-web-default
+| STATS requetes = COUNT(*) BY http.response.status_code
+| SORT requetes DESC
+
+# Répartition par méthode
+FROM logs-web-default
+| STATS requetes = COUNT(*) BY http.request.method
+| SORT requetes DESC
+
+# Volume par jour (jours découpés dans le fuseau du navigateur)
+FROM logs-web-default
+| STATS requetes = COUNT(*) BY jour = DATE_TRUNC(1 day, @timestamp)
+| SORT jour
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.2 — L'incident
+# ---------------------------------------------------------------------
+
+# KQL (barre de recherche de Discover, mode classique) :
+#   http.response.status_code >= 500
+
+# 1. Erreurs serveur par heure : trouver le créneau
+FROM logs-web-default
+| WHERE http.response.status_code >= 500
+| STATS erreurs = COUNT(*) BY heure = BUCKET(@timestamp, 1 hour)
+| SORT erreurs DESC
+| LIMIT 10
+
+# 1. Resserrer à 5 minutes sur l'heure trouvée (28/09, 14 h à Paris)
+FROM logs-web-default
+| WHERE @timestamp >= "2026-09-28T12:00:00Z" AND @timestamp < "2026-09-28T13:00:00Z"
+| STATS total = COUNT(*), erreurs = COUNT(*) WHERE http.response.status_code >= 500
+    BY tranche = BUCKET(@timestamp, 5 minutes)
+| SORT tranche
+
+# 1 et 3. Bornes exactes et nombre de réponses 503
+FROM logs-web-default
+| WHERE http.response.status_code == 503
+| STATS debut = MIN(@timestamp), fin = MAX(@timestamp), nb = COUNT(*)
+
+# 2. URL touchées et non touchées, par rubrique du site, pendant l'incident
+FROM logs-web-default
+| WHERE @timestamp >= "2026-09-28T12:00:00Z" AND @timestamp < "2026-09-28T12:45:00Z"
+| EVAL rubrique = CASE(
+    url.original LIKE "/offres/*/postuler", "candidature",
+    url.original LIKE "/offres/*", "fiche offre",
+    url.original LIKE "/recherche*", "recherche",
+    url.original LIKE "/api/*", "api",
+    url.original == "/", "accueil",
+    "autre (statique)")
+| STATS total = COUNT(*), erreurs = COUNT(*) WHERE http.response.status_code >= 500 BY rubrique
+| SORT erreurs DESC
+
+# KQL équivalent pour afficher les requêtes en erreur sur l'API :
+#   url.original : /api/* and http.response.status_code : 503
+
+# 4. Comportement des clients : volume API avant, pendant, après (13 h - 16 h)
+FROM logs-web-default
+| WHERE url.original LIKE "/api/*"
+  AND @timestamp >= "2026-09-28T11:00:00Z" AND @timestamp < "2026-09-28T14:00:00Z"
+| STATS requetes = COUNT(*), clients = COUNT_DISTINCT(source.address)
+    BY tranche = BUCKET(@timestamp, 15 minutes)
+| SORT tranche
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.3 — L'activité suspecte
+# ---------------------------------------------------------------------
+
+# KQL : http.response.status_code : 404
+
+# 1. Adresses IP à l'origine des réponses 404
+FROM logs-web-default
+| WHERE http.response.status_code == 404
+| STATS nb_404 = COUNT(*) BY source.address
+| SORT nb_404 DESC
+| LIMIT 10
+
+# 2. Moment et durée de l'activité de l'IP suspecte
+#    (adresse trouvée : 203.0.113.66)
+FROM logs-web-default
+| WHERE source.address == "203.0.113.66"
+| STATS debut = MIN(@timestamp), fin = MAX(@timestamp), requetes = COUNT(*)
+    BY http.response.status_code
+
+# 3. URL demandées par le robot
+FROM logs-web-default
+| WHERE source.address == "203.0.113.66"
+| STATS nb = COUNT(*) BY url.original
+| SORT nb DESC
+| LIMIT 30
+
+# 4. Navigateur déclaré par le robot
+FROM logs-web-default
+| WHERE source.address == "203.0.113.66"
+| STATS nb = COUNT(*) BY user_agent.original, user_agent.name
+
+# Les autres 404 : d'où viennent-elles ?
+FROM logs-web-default
+| WHERE http.response.status_code == 404 AND source.address != "203.0.113.66"
+| STATS nb = COUNT(*), ips = COUNT_DISTINCT(source.address) BY url.original
+| SORT nb DESC
+| LIMIT 20
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.4 — Les offres les plus consultées
+# ---------------------------------------------------------------------
+
+# Top 10 des offres consultées (GET avec code 200)
+FROM logs-web-default
+| WHERE http.request.method == "GET" AND http.response.status_code == 200
+  AND labels.offre_id IS NOT NULL
+| STATS vues = COUNT(*) BY labels.offre_id
+| SORT vues DESC
+| LIMIT 10
+
+# Titre, ville et contrat de ces offres (Kibana Dev Tools, une seule requête)
+#   (remplacer la liste par les 10 identifiants trouvés)
+# GET offres/_search
+# {
+#   "size": 10,
+#   "query": { "ids": { "values": ["OFF-xxxxx", "OFF-xxxxx"] } },
+#   "_source": ["id", "titre", "ville", "contrat"]
+# }
+
+
+# ---------------------------------------------------------------------
+# Exercice 4.5 — Le public
+# ---------------------------------------------------------------------
+
+# Répartition par système d'exploitation
+FROM logs-web-default
+| STATS requetes = COUNT(*) BY user_agent.os.name
+| SORT requetes DESC
+
+# Part du trafic mobile
+FROM logs-web-default
+| EVAL mobile = user_agent.os.name IN ("Android", "iOS")
+| STATS requetes = COUNT(*) BY mobile
+
+# Trois navigateurs les plus utilisés
+FROM logs-web-default
+| STATS requetes = COUNT(*) BY user_agent.name
+| SORT requetes DESC
+| LIMIT 3

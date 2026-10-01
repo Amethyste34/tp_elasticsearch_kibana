@@ -579,3 +579,249 @@ Les modifications restent possibles de façon exceptionnelle, pour corriger des 
 Les deux solutions se complètent : la sincedb évite les relectures inutiles en fonctionnement normal, l'empreinte garantit l'idempotence quand un rejeu a quand même lieu. C'est le même principe que pour les offres : **un `_id` déterministe** rend l'ingestion rejouable.
  
 Remise à zéro avant la partie 4 : `docker compose stop logstash`, `DELETE _data_stream/logs-web-default`, puis `docker compose up -d logstash`.
+ 
+## Partie 4 — Enquête dans Kibana
+ 
+Requêtes KQL et ES|QL : voir `requetes/enquete.txt`.
+ 
+Data view **Logs web** créée sur `logs-web-*` (champ temporel `@timestamp`), période absolue du 23/09/2026 00:00 au 30/09/2026 00:00 (heure de Paris) : 20 700 documents. Les requêtes ES|QL sont exécutées dans Discover ; Kibana transmet le fuseau du navigateur, les dates des résultats sont donc en heure de Paris. Les dates écrites dans les clauses `WHERE` sont en UTC (suffixe `Z`).
+ 
+### Exercice 4.1 — Vue d'ensemble
+ 
+**Répartition par code HTTP**
+ 
+| Code | Signification | Requêtes |
+| --- | --- | --- |
+| 200 | OK | ≈ 17 800 (arrondi Kibana : 17,8 k) |
+| 201 | Créé (candidature enregistrée) | ≈ 1 490 (1,49 k) |
+| 404 | Ressource introuvable | 508 |
+| 304 | Non modifié (cache du navigateur) | 488 |
+| 503 | Service indisponible | 402 |
+| 500 | Erreur interne du serveur | 5 |
+ 
+Environ 93 % des requêtes aboutissent (200, 201, 304). Deux codes d'erreur méritent l'enquête : les **503**, concentrés sur un seul créneau (exercice 4.2), et les **404** (exercice 4.3). Les 5 réponses **500** sont isolées, réparties sur la semaine : bruit de fond normal.
+ 
+**Répartition par méthode**
+ 
+| Méthode | Requêtes |
+| --- | --- |
+| GET | ≈ 19 210 (19,21 k) |
+| POST | ≈ 1 490 (1,49 k) |
+ 
+Les `POST` sont les candidatures (`POST /offres/OFF-…/postuler`) : leur nombre correspond à celui des réponses **201**, ce qui indique que toutes les candidatures ont été enregistrées. Tout le reste du trafic est de la consultation (`GET`).
+ 
+**Volume moyen de requêtes par jour**
+ 
+20 700 requêtes sur 7 jours, soit **environ 2 957 requêtes par jour** (environ 123 par heure, une dizaine toutes les 5 minutes).
+ 
+| Jour | Requêtes |
+| --- | --- |
+| 23/09 | 2 832 |
+| 24/09 | 2 884 |
+| 25/09 | 2 843 |
+| 26/09 | 3 122 |
+| 27/09 | 2 903 |
+| 28/09 et 29/09 | 6 116 au total |
+ 
+Le trafic est régulier d'un jour à l'autre. Le 26/09 se distingue légèrement (3 122) : on verra à l'exercice 4.3 que c'est le jour de l'activité du robot. L'histogramme de Discover montre aussi un pic le 28/09 vers 14 h, qui correspond à l'incident.
+ 
+### Exercice 4.2 — L'incident
+ 
+**1. Jour et créneau précis**
+ 
+Erreurs serveur (`>= 500`) par heure : **402 erreurs le dimanche 28/09/2026 entre 14 h et 15 h**, contre au plus 1 erreur sur chacune des autres heures de la semaine.
+ 
+Par tranches de 5 minutes sur cette heure :
+ 
+| Tranche | Requêtes | Erreurs 5xx |
+| --- | --- | --- |
+| 14:00 | 61 | 53 |
+| 14:05 | 50 | 41 |
+| 14:10 | 46 | 42 |
+| 14:15 | 43 | 35 |
+| … | … | … |
+| 14:35 | 64 | 47 |
+| 14:40 | 57 | 48 |
+| 14:45 | 10 | 0 |
+| 14:50 | 12 | 0 |
+| 14:55 | 6 | 0 |
+ 
+Bornes exactes des réponses 503 : **première à 14:00:08, dernière à 14:44:56** (heure de Paris).
+ 
+**2. URL touchées, et celles qui ne l'ont pas été**
+ 
+Requêtes entre 14:00 et 14:45, regroupées par rubrique du site :
+ 
+| Rubrique | Requêtes | Erreurs 5xx |
+| --- | --- | --- |
+| API (`/api/…`) | 403 | **402** |
+| Fiche d'offre (`/offres/OFF-…`) | 34 | 0 |
+| Recherche (`/recherche…`) | 17 | 0 |
+| Accueil (`/`) | 12 | 0 |
+| Candidature (`/offres/…/postuler`) | 7 | 0 |
+| Fichiers statiques | 5 | 0 |
+ 
+**Seule l'API a été touchée** : 402 de ses 403 requêtes ont échoué. Les pages du site (accueil, recherche, fiches d'offres) et les candidatures ont fonctionné normalement. La panne porte donc sur le service qui répond à l'API, pas sur le serveur web ni sur l'ensemble du site.
+ 
+**3. Nombre de réponses en erreur et durée**
+ 
+**402 réponses 503** (*Service Unavailable*), sur une durée de **44 min 48 s** (14:00:08 → 14:44:56). Le service est revenu brutalement : aucune erreur dès la tranche de 14:45.
+ 
+**4. Comportement des clients pendant l'incident**
+ 
+Requêtes sur l'API par quart d'heure, le 28/09 de 13 h à 16 h :
+ 
+| Tranche | Requêtes API | Adresses IP distinctes |
+| --- | --- | --- |
+| 13:00 | 8 | 8 |
+| 13:15 | 6 | 6 |
+| 13:30 | 1 | 1 |
+| 13:45 | 5 | 5 |
+| **14:00** | **136** | **120** |
+| **14:15 et 14:30** | **267 au total** | — |
+| 14:45 | 1 | 1 |
+| 15:00 | 6 | 6 |
+| 15:15 | 3 | 3 |
+| 15:30 | 4 | 4 |
+| 15:45 | 5 | 5 |
+ 
+Le volume de requêtes sur l'API a **fortement augmenté** pendant l'incident : environ **135 requêtes par quart d'heure** contre **5 en moyenne** avant et après, soit un trafic multiplié par 25 environ. Il retombe immédiatement à la normale à 14:45, au moment exact où les erreurs cessent. Les autres rubriques gardent leur volume habituel.
+ 
+Explication proposée : une **tempête de nouvelles tentatives** (*retry storm*). Les clients de l'API (application mobile, front-end, partenaires qui interrogent `/api/offres`) reçoivent une 503 et **réessaient automatiquement**, souvent tout de suite et plusieurs fois. Chaque échec génère ainsi de nouvelles requêtes, ce qui augmente encore la charge sur un service déjà en difficulté et peut prolonger la panne. Dès que le service répond de nouveau, les tentatives s'arrêtent et le trafic redevient normal.
+ 
+Une autre lecture est possible : un **afflux soudain** de clients sur l'API à 14:00 aurait **saturé** le service et provoqué les 503 (la hausse du trafic serait alors la cause, et non la conséquence). Le nombre d'adresses IP distinctes (120 pour 136 requêtes à 14:00) ne permet pas de trancher : les clients peuvent passer par des adresses différentes (proxys, réseaux mobiles), et une IP n'identifie pas un client de façon fiable. Dans les deux cas, la recommandation est la même : côté clients, des nouvelles tentatives **espacées et limitées** (*exponential backoff* avec un délai aléatoire) ; côté serveur, une **limitation de débit** (*rate limiting*) sur l'API et une alerte sur le taux de 5xx (bonus de la partie 5).
+ 
+**Rapport d'incident (synthèse)**
+ 
+> Le dimanche 28 septembre 2026, de 14:00:08 à 14:44:56 (45 minutes), l'API du site de recrutement (`/api/…`) a été indisponible : 402 requêtes sur 403 ont reçu une réponse 503. Le reste du site (accueil, recherche, fiches d'offres, candidatures) n'a pas été affecté. Pendant l'incident, le volume de requêtes sur l'API a été multiplié par 25 environ, puis est revenu à la normale dès le rétablissement du service, ce qui suggère des nouvelles tentatives automatiques des clients. Actions proposées : analyser les journaux applicatifs de l'API sur ce créneau pour identifier la cause racine, limiter le débit sur l'API, imposer un délai croissant entre les tentatives côté clients, et créer une alerte sur le taux d'erreurs 5xx.
+ 
+### Exercice 4.3 — L'activité suspecte
+ 
+**1. Adresse IP à l'origine d'une rafale de réponses 404**
+ 
+Réponses 404 par adresse IP : **`203.0.113.66`** en totalise **300**, alors qu'aucune autre adresse n'en dépasse 3. Les 208 autres 404 de la semaine sont éparpillées entre de nombreuses adresses.
+ 
+**2. Moment et durée de cette activité**
+ 
+Requêtes de `203.0.113.66` par code de réponse :
+ 
+| Code | Requêtes | Première | Dernière |
+| --- | --- | --- | --- |
+| **404** | **300** | **26/09 03:12 UTC** | **26/09 03:16 UTC** |
+| 200 | 24 | 23/09 | 28/09 |
+| 201 | 2 | 25/09 | 26/09 |
+| 304 | 1 | 25/09 | 25/09 |
+ 
+Les 300 requêtes en 404 ont eu lieu le **samedi 26 septembre 2026, entre 03:12 et 03:16 UTC, soit entre 05:12 et 05:16 à Paris** : environ **4 minutes**, plus d'une requête par seconde, en pleine nuit. C'est ce qui explique le léger excédent de trafic du 26/09 relevé à l'exercice 4.1.
+ 
+**3. Les URL demandées : que cherchait ce robot ?**
+ 
+Les 300 requêtes portent sur seulement **6 URL**, qui n'existent pas sur le site :
+ 
+| URL | Requêtes | Ce que le robot cherche |
+| --- | --- | --- |
+| `/admin` | 59 | une interface d'administration |
+| `/.git/config` | 55 | un dépôt Git exposé, qui permettrait de télécharger le code source |
+| `/.env` | 53 | un fichier de variables d'environnement : mots de passe, clés d'API (comme notre propre `.env`) |
+| `/phpmyadmin/` | 46 | l'outil d'administration de bases de données MySQL |
+| `/server-status` | 44 | la page d'état d'Apache, qui révèle la configuration et les requêtes en cours |
+| `/wp-login.php` | 43 | la page de connexion de WordPress, cible d'attaques par mots de passe |
+ 
+C'est un **scanner de vulnérabilités** automatique : il teste une liste de chemins connus pour trouver une faille de configuration, un secret oublié ou une interface d'administration mal protégée. Ces requêtes n'ont rien à voir avec l'activité du site de recrutement. Toutes ont reçu une 404 : le site n'exposait aucune de ces ressources, l'attaque a échoué.
+ 
+**4. Son `user_agent.original` : comment le distinguer d'un navigateur ?**
+ 
+`Mozilla/5.0 zgrab/0.x`, que le filtre `useragent` ne reconnaît pas (`user_agent.name` : `Other`).
+ 
+**zgrab** est un outil de scan massif d'Internet (projet ZMap). Le préfixe `Mozilla/5.0` est un leurre que tous les navigateurs utilisent, mais la suite ne ressemble à aucun navigateur : pas de système d'exploitation, pas de moteur de rendu (`AppleWebKit`, `Gecko`), pas de version de navigateur. Un vrai navigateur annonce par exemple `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36`.
+ 
+Son **comportement** le trahit aussi : des centaines de requêtes en quelques minutes, uniquement des chemins techniques sans lien avec le site, aucun chargement de page normale ni de fichier statique, en pleine nuit.
+ 
+Remarque importante : la même adresse `203.0.113.66` a aussi fait **27 requêtes légitimes** pendant la semaine (fiches d'offres, recherches, 2 candidatures), avec de vrais navigateurs (Safari sur iPhone et Mac, Chrome sous Windows et Android, Firefox sous Linux). Une adresse IP peut être **partagée** entre plusieurs personnes (box familiale, réseau d'entreprise, opérateur mobile). Il faut donc identifier le robot par la **combinaison** adresse + navigateur + comportement : bloquer l'adresse seule empêcherait aussi de vrais candidats d'accéder au site.
+ 
+**Toutes les 404 ne viennent pas de ce robot : d'où viennent les autres, et sont-elles inquiétantes ?**
+ 
+Les **208 autres 404** portent toutes sur des **fiches d'offres** dont l'identifiant n'existe pas, par exemple `/offres/OFF-09223`, `/offres/OFF-09347`, `/offres/OFF-09620`. Chaque URL n'est demandée que 2 ou 3 fois, par autant d'adresses différentes, avec des navigateurs ordinaires.
+ 
+L'index `offres` ne contient que les identifiants `OFF-00001` à `OFF-05000` : ces identifiants en `OFF-09xxx` correspondent sans doute à des **offres expirées ou retirées**. Les visiteurs arrivent par d'anciens liens (favoris, partage sur un réseau social, moteur de recherche, alerte e-mail) qui pointent vers une offre qui n'existe plus.
+ 
+Ces 404 **ne sont pas inquiétantes** du point de vue de la sécurité : ce sont de vrais visiteurs, en petit nombre, sur des URL du site. Elles signalent en revanche un **problème d'expérience utilisateur et de référencement** : on pourrait renvoyer un code **410 (Gone)** pour indiquer aux moteurs de recherche que l'offre a définitivement disparu, et afficher une page proposant des offres similaires plutôt qu'une simple erreur.
+ 
+### Exercice 4.4 — Les offres les plus consultées
+ 
+Top 10 des offres consultées (requêtes `GET` avec code 200, regroupées par `labels.offre_id`), puis détails récupérés dans l'index `offres` avec une seule requête `ids` dans Dev Tools :
+ 
+| Rang | Offre | Vues | Titre | Ville | Contrat |
+| --- | --- | --- | --- | --- | --- |
+| 1 | OFF-04662 | 8 | Développeur Front-end Senior | Bordeaux | Freelance |
+| 2 | OFF-03141 | 7 | Développeur Python Confirmé | Bordeaux | CDI |
+| 3 | OFF-01153 | 7 | Développeur Java Confirmé | Toulouse | Freelance |
+| 4 | OFF-01660 | 6 | Architecte Cloud Senior | Lyon | CDI |
+| 5 | OFF-01275 | 6 | Administrateur Bases de Données Lead | Paris | CDI |
+| 6 | OFF-03524 | 6 | Développeur Python (Alternance) | Toulouse | Alternance |
+| 7 | OFF-00901 | 6 | Développeur Java Junior | Paris | CDI |
+| 8 | OFF-03126 | 6 | Administrateur Bases de Données Junior | Lyon | CDI |
+| 9 | OFF-03145 | 6 | Data Engineer Lead | Montpellier | CDI |
+| 10 | OFF-03923 | 6 | Architecte Cloud Confirmé | Lyon | CDI |
+ 
+Requête Dev Tools :
+ 
+```text
+GET offres/_search
+{
+  "size": 10,
+  "query": {
+    "ids": {
+      "values": ["OFF-04662", "OFF-03141", "OFF-01153", "OFF-01660", "OFF-01275",
+                 "OFF-03524", "OFF-00901", "OFF-03126", "OFF-03145", "OFF-03923"]
+    }
+  },
+  "_source": ["id", "titre", "ville", "contrat"]
+}
+```
+ 
+La requête `ids` cherche directement par `_id`. Elle fonctionne parce que, grâce au `document_id => "%{id}"` du pipeline `offres` (partie 1), l'`_id` de chaque document est l'identifiant métier de l'offre, le même que celui extrait des URL dans `labels.offre_id`. C'est un exemple concret de l'intérêt d'un identifiant métier : il fait le lien entre les deux jeux de données. Les résultats ne sont pas renvoyés dans l'ordre de la liste (score identique de 1 pour tous) : le classement par vues vient de la requête ES|QL.
+ 
+Observations :
+ 
+- Les écarts sont **très faibles** (6 à 8 vues sur la semaine) : le trafic est réparti sur des milliers d'offres, sans offre qui se détache nettement. Plusieurs offres sont probablement à égalité à 6 vues : le `LIMIT 10` n'en retient que certaines, ce classement est donc à prendre avec prudence à partir de la 4e place.
+- Les profils les plus consultés sont surtout des postes de **développement** (Python, Java, front-end), puis le cloud, les bases de données et la data.
+- Côté contrats, 7 CDI, 2 missions en freelance (dont les deux premières places de l'offre front-end et de l'offre Java) et 1 alternance.
+- Les villes sont variées : Lyon (3), Bordeaux, Toulouse et Paris (2 chacune), Montpellier (1).
+
+### Exercice 4.5 — Le public
+ 
+**Répartition par système d'exploitation (`user_agent.os.name`)**
+ 
+| Système | Requêtes | Type d'appareil |
+| --- | --- | --- |
+| Mac OS X | ≈ 4 150 | ordinateur |
+| iOS | ≈ 4 100 | mobile |
+| Windows | ≈ 4 060 | ordinateur |
+| Android | ≈ 4 060 | mobile |
+| Linux | ≈ 4 040 | ordinateur |
+| Other | 300 | robot `zgrab` (exercice 4.3) |
+ 
+(Kibana arrondit les valeurs au-delà de 1 000.)
+ 
+**Quelle part du trafic provient d'appareils mobiles ?**
+ 
+Les appareils mobiles (iOS et Android) totalisent **≈ 8 150 requêtes sur 20 700, soit environ 39 %** du trafic. Les ordinateurs (Mac OS X, Windows, Linux) en représentent environ 60 %, et le robot `zgrab` les 300 requêtes restantes (« Other », 1,5 %). Si l'on ne compte que les visiteurs humains (20 400 requêtes), la part mobile est d'environ **40 %**.
+ 
+Requête utilisée : `EVAL mobile = user_agent.os.name IN ("Android", "iOS")` puis `STATS … BY mobile` → `true` ≈ 8 150, `false` ≈ 12 540.
+ 
+Conséquence pratique : deux visites sur cinq se font sur téléphone, le site de recrutement et le parcours de candidature doivent être parfaitement utilisables sur mobile.
+ 
+**Quels sont les trois navigateurs les plus utilisés ?**
+ 
+| Rang | Navigateur (`user_agent.name`) | Requêtes |
+| --- | --- | --- |
+| 1 | Safari (Mac) | ≈ 4 150 |
+| 2 | Mobile Safari (iPhone) | ≈ 4 100 |
+| 3 | Chrome (ordinateur) | ≈ 4 060 |
+ 
+Les écarts sont minimes : le trafic est réparti presque à parts égales entre cinq navigateurs, chacun associé à un système (Safari sur Mac, Mobile Safari sur iPhone, Chrome sur Windows, Chrome Mobile sur Android, Firefox sous Linux), environ 20 % chacun. Chrome Mobile (≈ 4 060) est d'ailleurs pratiquement à égalité avec Chrome.
+ 
+Le classement dépend donc de la façon de regrouper : `useragent` distingue les versions ordinateur et mobile d'un même navigateur. En les regroupant par **famille**, Chrome (ordinateur et mobile, ≈ 8 100 requêtes) et Safari (Mac et iPhone, ≈ 8 250) arrivent largement en tête, devant Firefox (≈ 4 040).
+ 
+Une répartition aussi régulière est typique de données **générées** pour le TP ; sur un vrai site, Chrome dominerait nettement.
