@@ -191,3 +191,165 @@ C'est le comportement voulu en production (ne pas tout renvoyer à chaque redém
 Elasticsearch générerait un **`_id` aléatoire** pour chaque document reçu. Chaque relecture créerait donc 5 000 **nouveaux** documents au lieu de remplacer les existants : 10 000 documents après l'exercice 1.3 (les 5 000 d'`ingest.py` plus 5 000 copies), 15 000 après l'exercice 1.4. Chaque offre existerait en plusieurs exemplaires, ce qui fausserait les comptages, les agrégations et les résultats de recherche. On ne pourrait pas non plus retrouver une offre par `GET offres/_doc/OFF-00002`.
  
 Le `document_id` métier, combiné à l'action `index`, rend l'ingestion **idempotente** : on peut relancer Logstash autant de fois qu'on veut, l'index reflète toujours le contenu du fichier, sans doublon.
+ 
+## Partie 2 — Superviser et fiabiliser
+ 
+### Exercice 2.1 — Superviser
+ 
+Requêtes sur l'API de supervision de Logstash (port 9600) : `/?pretty`, `/_node/pipelines?pretty` et `/_node/stats/pipelines/offres?pretty`.
+ 
+Extrait des statistiques du pipeline `offres` :
+ 
+| Élément | Valeur |
+| --- | --- |
+| `events.in` / `filtered` / `out` | 5000 / 5000 / 5000 |
+| `events.duration_in_millis` (pipeline) | 12 987 |
+| Entrée `file` : `out` | 5000 |
+| Filtre `mutate` : `duration_in_millis` | 703 |
+| Sortie `elasticsearch` : `duration_in_millis` | 12 240 |
+| Sortie `elasticsearch` : requêtes `_bulk` | 43, toutes en 200 ; 5000 documents en succès |
+| File d'attente | `memory`, 0 événement en attente |
+| `dead_letter_queue_enabled` | `false` |
+ 
+**Combien de pipelines sont chargés, avec combien de workers chacun ?**
+ 
+**Deux pipelines**, `offres` et `web`, ceux déclarés dans `pipelines.yml`. Chacun a **12 workers** (valeur par défaut : le nombre de cœurs processeur vus par le conteneur), traite les événements par lots de **125** (`batch_size`) et attend au plus **50 ms** pour compléter un lot (`batch_delay`). L'état général de Logstash est `green`.
+ 
+**Que valent `in`, `filtered` et `out` pour `offres`, et que représentent-ils ?**
+ 
+Les trois valent **5000** :
+ 
+- `in` : événements entrés dans le pipeline (lus par l'entrée `file`) ;
+- `filtered` : événements passés par l'étape des filtres ;
+- `out` : événements transmis aux sorties.
+Ces compteurs sont **remis à zéro à chaque démarrage** de Logstash : ils correspondent à la seule lecture de l'exercice 1.4, et non aux trois lectures du fichier. L'égalité des trois valeurs montre qu'aucun événement n'a été perdu ni supprimé (`drop`) en route. Côté sortie, `documents.successes: 5000` et 43 requêtes `_bulk` toutes en réponse 200 confirment qu'Elasticsearch a accepté tous les documents.
+ 
+Attention : `out` compte les événements remis à la sortie, pas les documents acceptés par Elasticsearch. À l'exercice 1.2, `out` aurait aussi valu 5000, alors que tous les documents avaient été refusés. Pour cela, il faut regarder `documents.successes` et les codes de réponse de la sortie `elasticsearch`.
+ 
+**Quel plugin du pipeline consomme le plus de temps ?**
+ 
+La **sortie `elasticsearch`**, avec **12 240 ms** sur un total de 12 987 ms pour le pipeline, soit environ 94 %. Le filtre `mutate` ne prend que 703 ms (environ 0,14 ms par événement). C'est logique : supprimer quelques champs se fait en mémoire, alors que la sortie attend la réponse d'Elasticsearch pour chaque requête `_bulk` (envoi réseau, indexation, analyse des champs `text` avec l'analyseur `french`, écriture sur disque).
+ 
+Ces durées sont du temps cumulé sur l'ensemble des workers, pas du temps écoulé : le pipeline a en réalité traité les 5 000 offres en quelques secondes. C'est donc la sortie qu'il faudrait optimiser en priorité (taille des lots, nombre de workers, performance du cluster).
+ 
+### Exercice 2.2 — Isoler les documents rejetés
+ 
+Mise en œuvre :
+ 
+1. Ajout de `DEAD_LETTER_QUEUE_ENABLE=true` dans l'environnement du service `logstash` (`docker-compose.override.yml`) : la ligne n'existait pas dans le kit, elle a été ajoutée. Conteneur recréé avec `docker compose up -d logstash`.
+2. Chemin de l'entrée `file` élargi à `/data/offres*.ndjson` dans `offres.conf`.
+3. Création de `data/offres_test.ndjson` : une seule offre, copie de la dernière ligne de `offres.ndjson`, avec `"id": "OFF-99999"` et un champ `"prime": 3000` absent du mapping.
+4. `docker compose restart logstash`.
+Vérifications :
+ 
+- l'API de Logstash indique `"dead_letter_queue_enabled" : true` pour les deux pipelines, chacun avec son propre dossier (`…/dead_letter_queue/offres` et `…/dead_letter_queue/web`) ;
+- contenu de la DLQ :
+```text
+/usr/share/logstash/data/dead_letter_queue/offres:
+-rw-r--r-- 1 logstash root 2165 Oct  1 12:37 1.log
+-rw-r--r-- 1 logstash root 2164 Oct  1 12:39 2.log
+-rw-r--r-- 1 logstash root    1 Oct  1 12:39 3.log.tmp
+```
+ 
+- `GET offres/_doc/OFF-99999` → `"found": false` (404) ; `GET offres/_count` → 5000.
+La DLQ contient **deux** exemplaires de `OFF-99999` : en mode `read`, Logstash a repéré le nouveau fichier `offres_test.ndjson` dès sa création (12:37 UTC), puis l'a relu au redémarrage (12:39 UTC), la sincedb étant désactivée. Les fichiers `.tmp` de 1 octet sont les segments en cours d'écriture, encore vides.
+ 
+Relecture de la DLQ avec un second Logstash éphémère (entrée `dead_letter_queue`, `pipeline_id => "offres"`, `commit_offsets => false`). Extrait de l'un des deux événements :
+ 
+```ruby
+{
+                   "id" => "OFF-99999",
+                "prime" => 3000,
+                "ville" => "Nice",
+                "titre" => "Développeur Java Junior",
+                  …
+            "@metadata" => {
+                     "path" => "/data/offres_test.ndjson",
+        "dead_letter_queue" => {
+            "plugin_type" => "elasticsearch",
+              "plugin_id" => "61c7b428…",
+             "entry_time" => 2026-10-01T12:37:50.568024443Z,
+                 "reason" => "Could not index event to Elasticsearch. status: 400, action: [\"index\",
+                              {_id: \"OFF-99999\", _index: \"offres\"}, {…}], response: {\"index\" =>
+                              {\"status\" => 400, \"error\" => {\"type\" => \"strict_dynamic_mapping_exception\",
+                              \"reason\" => \"[1:480] mapping set to strict, dynamic introduction of [prime]
+                              within [_doc] is not allowed\"}}}"
+        }
+    }
+}
+```
+ 
+**Le document `OFF-99999` est-il dans l'index ? Où se trouve-t-il ?**
+ 
+Non : `GET offres/_doc/OFF-99999` renvoie `"found": false`, et le compte reste à 5 000. Les 5 000 offres valides ont été indexées normalement : le document refusé n'a rien bloqué.
+ 
+Il se trouve dans la **dead letter queue** du pipeline `offres`, sur le disque de Logstash : `/usr/share/logstash/data/dead_letter_queue/offres/` (fichiers `1.log` et `2.log`). Ce dossier est dans le volume Docker `lsdata` : il survit aux redémarrages et à la recréation du conteneur.
+ 
+**Quelle raison de refus est enregistrée dans `[@metadata][dead_letter_queue]` ?**
+ 
+Une erreur **400** de type **`strict_dynamic_mapping_exception`** : `mapping set to strict, dynamic introduction of [prime] within [_doc] is not allowed`. Le champ `prime` n'existe pas dans le mapping strict de `offres`.
+ 
+Cette fois, c'est bien `prime` qui est cité, et non `@version` comme à l'exercice 1.2 : le filtre `mutate` a retiré les champs ajoutés par Logstash, il ne reste que le champ métier imprévu. La DLQ conserve aussi :
+ 
+- `entry_time` : l'heure du refus ;
+- `plugin_type` et `plugin_id` : le plugin qui a rejeté l'événement (la sortie `elasticsearch`) ;
+- `[@metadata][path]` : le fichier source (`/data/offres_test.ndjson`) ;
+- l'**événement complet**, tel qu'il a été envoyé à Elasticsearch, et la requête `_bulk` exacte dans `reason`.
+**Comparaison avec `raise_on_error=False` dans `ingest.py` : qu'apporte la DLQ en plus ?**
+ 
+Les deux approches ont un point commun : un document invalide ne bloque pas le reste de l'ingestion. Mais avec `raise_on_error=False`, `ingest.py` se contentait d'**afficher** l'erreur dans la console : une fois le terminal fermé, il ne restait aucune trace exploitable, et pour corriger il fallait retrouver la ligne dans le fichier source.
+ 
+La DLQ apporte en plus :
+ 
+- la **conservation** : le document refusé et la raison du refus sont écrits sur disque, ils survivent aux redémarrages ;
+- le **contexte complet** : l'événement tel qu'il était après les filtres, l'heure, le plugin en cause, le fichier d'origine ;
+- l'**indépendance vis-à-vis de la source** : on peut corriger même si le fichier source a été supprimé, déplacé ou réécrit entre-temps (rotation de logs, fichier supprimé après lecture…) ;
+- la **réinjection automatisable** : l'entrée `dead_letter_queue` permet d'écrire un pipeline Logstash qui relit, corrige et renvoie les documents, au lieu d'un traitement manuel ;
+- la **supervision** : la taille de la DLQ peut être surveillée, et une DLQ qui grossit signale un problème de données.
+Sans DLQ, Logstash perd le document refusé et ne laisse qu'une ligne d'avertissement dans son journal, comme à l'exercice 1.2.
+ 
+**Comment corriger et réinjecter ce document, en trois étapes ?**
+ 
+1. **Analyser** : relire la DLQ (comme ci-dessus) pour identifier la cause, ici le champ `prime` absent du mapping, et décider de la correction avec le métier.
+2. **Corriger** : deux options selon la décision.
+   - Si la prime ne doit pas être stockée : écrire un pipeline de reprise qui lit la DLQ (`input { dead_letter_queue { pipeline_id => "offres" commit_offsets => true } }`) et supprime le champ (`mutate { remove_field => ["prime", "@timestamp", "@version"] }`).
+   - Si la prime est une information utile : l'ajouter au mapping (`PUT offres/_mapping` avec `"prime": { "type": "integer" }` ; ajouter un champ est autorisé, contrairement à modifier un champ existant), puis relire la DLQ sans modifier le document.
+3. **Réinjecter et vérifier** : envoyer le résultat avec la même sortie `elasticsearch` (`index => "offres"`, `document_id => "%{id}"`), puis contrôler avec `GET offres/_doc/OFF-99999` et `GET offres/_count` (5001). Grâce au `document_id` métier, les deux exemplaires présents dans la DLQ aboutissent au même document, sans doublon. Avec `commit_offsets => true`, les entrées traitées sont marquées comme lues et ne seront pas retraitées ; on peut ensuite purger la DLQ.
+Le fichier `data/offres_test.ndjson` a ensuite été supprimé.
+ 
+### Exercice 2.3 — Pourquoi deux pipelines ?
+ 
+**Si `pipelines.yml` n'était pas monté, combien de pipelines Logstash chargerait-il ?**
+ 
+**Un seul**, nommé `main`. L'image Docker charge alors tous les fichiers du dossier `/usr/share/logstash/pipeline/` et les **concatène** en un seul pipeline : les entrées, les filtres et les sorties de `offres.conf` et de `web.conf` sont mis bout à bout.
+ 
+**Que deviendrait une offre lue dans `offres.ndjson` ? Et une ligne de log d'accès ?**
+ 
+Dans un pipeline unique, chaque événement passe par **tous** les filtres et est envoyé à **toutes** les sorties, quelle que soit l'entrée qui l'a lu (sauf à ajouter des conditions partout).
+ 
+- Une **offre** serait envoyée à la fois dans l'index `offres` (correct) et dans le data stream `logs-web-default`, où elle n'a rien à faire : elle polluerait les logs web et fausserait les statistiques de trafic. Elle passerait aussi par les filtres des logs (`grok`, `date`, `useragent`), inutilement.
+- Une **ligne de log** serait envoyée dans `logs-web-default` (correct), mais aussi dans l'index `offres`, où elle serait **refusée** par le mapping strict (champs `message`, `source`, `http`, `url`… inconnus) : 20 700 erreurs 400, perdues ou entassées dans la DLQ. Pire, le filtre `mutate` de `offres.conf` lui retirerait `@timestamp` : elle ne pourrait plus être datée correctement, alors qu'un data stream exige ce champ.
+**Deux autres avantages à isoler les pipelines**
+ 
+- **Isolation des pannes** : si Elasticsearch refuse ou ralentit les écritures d'un flux (index bloqué, mapping en erreur), seul ce pipeline est freiné ; l'autre continue de fonctionner normalement. Dans un pipeline unique, une sortie bloquée bloque tout.
+- **Réglages indépendants** : chaque pipeline a ses propres workers, taille de lots, type de file d'attente (mémoire ou persistée) et sa propre DLQ (on l'a vu : un dossier par pipeline). On peut par exemple persister la file des logs sans ralentir le rechargement des offres.
+- **Supervision et maintenance séparées** : l'API de supervision donne des compteurs par pipeline (`in`, `out`, durées), ce qui permet de savoir immédiatement quel flux pose problème. Chaque pipeline peut aussi être modifié et rechargé sans toucher à l'autre, et chaque fichier reste court et lisible.
+### Exercice 2.4 — Ne rien perdre (réflexion)
+ 
+**Logstash est arrêté brutalement pendant la lecture d'un gros fichier. Avec la file en mémoire, que deviennent les événements lus mais pas encore envoyés ?**
+ 
+Ils sont **perdus**. La file en mémoire (`queue.type: memory`, valeur par défaut, visible dans l'API : `"queue" : { "type" : "memory" }`) disparaît avec le processus. Tous les événements déjà lus par l'entrée mais pas encore confirmés par Elasticsearch, qu'ils attendent dans la file, en cours de filtrage ou dans une requête `_bulk` sans réponse, n'existent plus nulle part dans Logstash.
+ 
+Le risque est aggravé par la sincedb : l'entrée `file` y enregistre régulièrement sa position de lecture. Au redémarrage, elle reprend après la dernière position enregistrée, et les lignes lues avant l'arrêt mais jamais envoyées ne sont pas relues. Dans notre labo, la sincedb à `/dev/null` masque ce problème, puisque le fichier entier est relu à chaque démarrage.
+ 
+**Quel réglage change ce comportement, et quelle garantie obtient-on ?**
+ 
+La **file persistée** : `queue.type: persisted` (sous Docker, variable d'environnement `QUEUE_TYPE=persisted`), réglable par pipeline dans `pipelines.yml`. Les événements sont écrits sur disque dès leur réception, avant d'être confirmés à l'entrée, et ne sont retirés de la file qu'une fois acceptés par les sorties. Après un arrêt brutal, Logstash reprend les événements restés dans la file et les renvoie.
+ 
+On obtient une garantie de livraison **« au moins une fois »** (*at-least-once*) : aucun événement n'est perdu, mais certains peuvent être envoyés **deux fois**. C'est le cas d'un lot qu'Elasticsearch a indexé juste avant l'arrêt, mais dont Logstash n'a pas eu le temps d'enregistrer la confirmation : il sera renvoyé au redémarrage. La contrepartie est un débit un peu plus faible et de l'espace disque à prévoir.
+ 
+**Pourquoi le `document_id` de la partie 1 devient-il alors indispensable ?**
+ 
+Parce qu'il transforme les doublons possibles en **remplacements**. Un événement renvoyé après le redémarrage porte le même identifiant métier (`OFF-xxxxx`) : l'action `index` réécrit le même document, seul le `_version` augmente, comme on l'a observé aux exercices 1.3 et 1.4. Sans `document_id`, chaque renvoi créerait un nouveau document avec un `_id` aléatoire, donc des offres en double dans l'index.
+ 
+File persistée et `_id` métier se complètent : la première garantit qu'on ne **perd** rien, le second qu'on ne **duplique** rien. Ensemble, ils donnent l'équivalent d'un traitement « exactement une fois » sur le résultat final.

@@ -13,6 +13,7 @@ services:
       - ES_USER=logstash_internal
       - ES_PASSWORD=${LOGSTASH_INTERNAL_PASSWORD}
       - LS_JAVA_OPTS=-Xms512m -Xmx512m
+      - DEAD_LETTER_QUEUE_ENABLE=true
     ports:
       - "127.0.0.1:9600:9600"   # API de supervision de Logstash
     volumes:
