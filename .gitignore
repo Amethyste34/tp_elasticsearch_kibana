@@ -2,3 +2,6 @@
 .venv/
 __pycache__/
 data/offres.ndjson
+
+# TP2 : logs générés par data/generate_access_logs.py
+data/access.log
